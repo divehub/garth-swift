@@ -16,13 +16,21 @@ let package = Package(
             targets: ["GarminCLI"]
         ),
     ],
+    dependencies: [
+        .package(url: "https://github.com/weichsel/ZIPFoundation.git", from: "0.9.0"),
+        .package(url: "https://github.com/garmin/fit-objective-c-sdk.git", from: "21.171.0"),
+    ],
     targets: [
         .target(
             name: "Garth"
         ),
         .executableTarget(
             name: "GarminCLI",
-            dependencies: ["Garth"]
+            dependencies: [
+                "Garth",
+                .product(name: "ZIPFoundation", package: "ZIPFoundation"),
+                .product(name: "FIT", package: "fit-objective-c-sdk"),
+            ]
         ),
         .testTarget(
             name: "GarthTests",

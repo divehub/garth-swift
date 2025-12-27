@@ -1,7 +1,6 @@
 import Foundation
 import Garth
 
-@main
 struct GarminCLI {
     static func main() async {
         let args = CommandLine.arguments.dropFirst()
@@ -19,6 +18,12 @@ struct GarminCLI {
                 try await refreshCommand()
             case "status":
                 try await statusCommand()
+            case "list-dives":
+                try await listDivesCommand()
+            case "get-activity":
+                try await getActivityCommand(args: Array(args.dropFirst()))
+            case "decode-fit":
+                try decodeFitCommand(args: Array(args.dropFirst()))
             case "help", "--help", "-h":
                 printHelp()
             default:
@@ -120,28 +125,12 @@ struct GarminCLI {
     }
 
     static func profileCommand() async throws {
-        // Check for OAuth consumer credentials
-        let tokenManager = TokenManager()
-
-        guard try await tokenManager.hasTokens() else {
-            print("Not logged in. Please run 'login' first.")
-            return
-        }
-
-        // Fetch consumer credentials
-        let consumer = try await fetchOAuthConsumer()
-
-        // Create client with token exchanger
-        let exchanger = OAuthTokenExchanger(
-            consumerKey: consumer.key,
-            consumerSecret: consumer.secret
-        )
-        await tokenManager.setTokenExchanger(exchanger)
+        let client = try await createGarthClient()
 
         // Get profile
         print("Fetching user profile...")
 
-        let oauth2 = try await tokenManager.getValidOAuth2Token()
+        let oauth2 = try await client.tokenManager.getValidOAuth2Token()
 
         // Make profile request
         let url = URL(string: "https://connectapi.garmin.com/userprofile-service/socialProfile")!
@@ -234,6 +223,63 @@ struct GarminCLI {
         }
     }
 
+    static func listDivesCommand() async throws {
+        let client = try await createGarthClient()
+
+        // Fetch dive logs and total count
+        print("Fetching dive logs...")
+        let diveFetcher = DiveLogFetcher(client: client)
+
+        // Fetch total count and activities in parallel
+        async let totalCount = diveFetcher.fetchTotalDiveCount()
+        async let dives = diveFetcher.fetchDiveLogs(start: 0, limit: 20)
+
+        let (total, activities) = try await (totalCount, dives)
+
+        // Display results
+        diveFetcher.printDiveLogs(activities, totalCount: total)
+    }
+
+    static func getActivityCommand(args: [String]) async throws {
+        guard let activityId = args.first else {
+            print("Error: Activity ID is required")
+            print("Usage: GarminCLI get-activity <activityId>")
+            exit(1)
+        }
+
+        let client = try await createGarthClient()
+
+        // Download activity
+        print("Downloading activity \(activityId)...")
+        let activityDownloader = ActivityDownloader(client: client)
+        try await activityDownloader.downloadActivity(activityId: activityId)
+    }
+
+    static func decodeFitCommand(args: [String]) throws {
+        guard let filePath = args.first else {
+            print("Error: FIT file path is required")
+            print("Usage: GarminCLI decode-fit <path-to-fit-file>")
+            exit(1)
+        }
+
+        // Resolve path
+        let resolvedPath: String
+        if filePath.hasPrefix("/") {
+            resolvedPath = filePath
+        } else {
+            resolvedPath = FileManager.default.currentDirectoryPath + "/" + filePath
+        }
+
+        guard FileManager.default.fileExists(atPath: resolvedPath) else {
+            print("Error: File not found: \(resolvedPath)")
+            exit(1)
+        }
+
+        print("Decoding FIT file: \(resolvedPath)")
+        let decoder = FITFileDecoder(filePath: resolvedPath)
+        try decoder.decode()
+    }
+
     // MARK: - Helpers
 
     static func promptCredentials() -> (email: String, password: String) {
@@ -254,16 +300,22 @@ struct GarminCLI {
         Usage: GarminCLI <command>
 
         Commands:
-            login     Login to Garmin Connect with username/password
-            profile   Fetch and display user profile
-            refresh   Force token refresh
-            status    Show authentication status
-            logout    Clear stored tokens and credentials
-            help      Show this help message
+            login           Login to Garmin Connect with username/password
+            profile         Fetch and display user profile
+            list-dives      Fetch and display dive logs
+            get-activity    Download activity FIT file by ID
+            decode-fit      Decode and display FIT file data
+            refresh         Force token refresh
+            status          Show authentication status
+            logout          Clear stored tokens and credentials
+            help            Show this help message
 
         Examples:
             GarminCLI login
             GarminCLI profile
+            GarminCLI list-dives
+            GarminCLI get-activity 12345678901
+            GarminCLI decode-fit 12345678901.fit
             GarminCLI logout
         """)
     }
@@ -279,6 +331,27 @@ struct GarminCLI {
 
         let consumer = try JSONDecoder().decode(Consumer.self, from: data)
         return (consumer.consumer_key, consumer.consumer_secret)
+    }
+
+    static func createGarthClient() async throws -> GarthClient {
+        let tokenManager = TokenManager()
+
+        guard try await tokenManager.hasTokens() else {
+            print("Not logged in. Please run 'login' first.")
+            exit(1)
+        }
+
+        // Fetch consumer credentials
+        let consumer = try await fetchOAuthConsumer()
+
+        // Create client with token exchanger
+        let exchanger = OAuthTokenExchanger(
+            consumerKey: consumer.key,
+            consumerSecret: consumer.secret
+        )
+        await tokenManager.setTokenExchanger(exchanger)
+
+        return GarthClient(tokenManager: tokenManager)
     }
 }
 
@@ -352,3 +425,6 @@ struct CredentialManager {
         SecItemDelete(query as CFDictionary)
     }
 }
+
+// Entry point
+await GarminCLI.main()
