@@ -20,6 +20,8 @@ struct GarminCLI {
                 try await statusCommand()
             case "list-dives":
                 try await listDivesCommand()
+            case "list-devices":
+                try await listDevicesCommand()
             case "get-activity":
                 try await getActivityCommand(args: Array(args.dropFirst()))
             case "decode-fit":
@@ -240,6 +242,15 @@ struct GarminCLI {
         diveFetcher.printDiveLogs(activities, totalCount: total)
     }
 
+    static func listDevicesCommand() async throws {
+        let client = try await createGarthClient()
+
+        print("Fetching registered devices...")
+        let deviceFetcher = DeviceListFetcher(client: client)
+        let devices = try await deviceFetcher.fetchDevices()
+        deviceFetcher.printDevices(devices)
+    }
+
     static func getActivityCommand(args: [String]) async throws {
         guard let activityId = args.first else {
             print("Error: Activity ID is required")
@@ -303,6 +314,7 @@ struct GarminCLI {
             login           Login to Garmin Connect with username/password
             profile         Fetch and display user profile
             list-dives      Fetch and display dive logs
+            list-devices    List registered devices
             get-activity    Download activity FIT file by ID
             decode-fit      Decode and display FIT file data
             refresh         Force token refresh
@@ -314,6 +326,7 @@ struct GarminCLI {
             GarminCLI login
             GarminCLI profile
             GarminCLI list-dives
+            GarminCLI list-devices
             GarminCLI get-activity 12345678901
             GarminCLI decode-fit 12345678901.fit
             GarminCLI logout

@@ -50,6 +50,12 @@ struct FITFileDecoder {
                 if mesg.isProductValid() {
                     print("Product: \(mesg.getProduct())")
                 }
+                if mesg.isProductNameValid() {
+                    print("Product Name: \(mesg.getProductName())")
+                }
+                if mesg.isGarminProductValid() {
+                    print("Garmin Product: \(mesg.getGarminProduct())")
+                }
                 if mesg.isSerialNumberValid() {
                     print("Serial Number: \(mesg.getSerialNumber())")
                 }
@@ -69,6 +75,12 @@ struct FITFileDecoder {
                 }
                 if mesg.isProductValid() {
                     print("Product: \(mesg.getProduct())")
+                }
+                if mesg.isProductNameValid() {
+                    print("Product Name: \(mesg.getProductName())")
+                }
+                if mesg.isGarminProductValid() {
+                    print("Garmin Product: \(mesg.getGarminProduct())")
                 }
                 if mesg.isSoftwareVersionValid() {
                     print("Software Version: \(mesg.getSoftwareVersion())")
@@ -158,7 +170,9 @@ struct FITFileDecoder {
                 if mesg.isStartPositionLatValid() && mesg.isStartPositionLongValid() {
                     let lat = Double(mesg.getStartPositionLat()) / 11930465.0
                     let lon = Double(mesg.getStartPositionLong()) / 11930465.0
-                    print("  Start Position: \(String(format: "%.6f", lat)), \(String(format: "%.6f", lon))")
+                    print(
+                        "  Start Position: \(String(format: "%.6f", lat)), \(String(format: "%.6f", lon))"
+                    )
                 }
             }
         }
@@ -344,13 +358,15 @@ struct FITFileDecoder {
                     print("Avg Ascent Rate: \(String(format: "%.3f", mesg.getAvgAscentRate())) m/s")
                 }
                 if mesg.isAvgDescentRateValid() {
-                    print("Avg Descent Rate: \(String(format: "%.3f", mesg.getAvgDescentRate())) m/s")
+                    print(
+                        "Avg Descent Rate: \(String(format: "%.3f", mesg.getAvgDescentRate())) m/s")
                 }
                 if mesg.isMaxAscentRateValid() {
                     print("Max Ascent Rate: \(String(format: "%.3f", mesg.getMaxAscentRate())) m/s")
                 }
                 if mesg.isMaxDescentRateValid() {
-                    print("Max Descent Rate: \(String(format: "%.3f", mesg.getMaxDescentRate())) m/s")
+                    print(
+                        "Max Descent Rate: \(String(format: "%.3f", mesg.getMaxDescentRate())) m/s")
                 }
             }
         }
@@ -455,7 +471,9 @@ struct FITFileDecoder {
                     print("CCR Low Setpoint: \(String(format: "%.2f", mesg.getCcrLowSetpoint()))")
                 }
                 if mesg.isCcrLowSetpointDepthValid() {
-                    print("CCR Low Setpoint Depth: \(String(format: "%.1f", mesg.getCcrLowSetpointDepth())) m")
+                    print(
+                        "CCR Low Setpoint Depth: \(String(format: "%.1f", mesg.getCcrLowSetpointDepth())) m"
+                    )
                 }
                 if mesg.isCcrHighSetpointSwitchModeValid() {
                     print("CCR High Setpoint Switch Mode: \(mesg.getCcrHighSetpointSwitchMode())")
@@ -464,7 +482,9 @@ struct FITFileDecoder {
                     print("CCR High Setpoint: \(String(format: "%.2f", mesg.getCcrHighSetpoint()))")
                 }
                 if mesg.isCcrHighSetpointDepthValid() {
-                    print("CCR High Setpoint Depth: \(String(format: "%.1f", mesg.getCcrHighSetpointDepth())) m")
+                    print(
+                        "CCR High Setpoint Depth: \(String(format: "%.1f", mesg.getCcrHighSetpointDepth())) m"
+                    )
                 }
             }
         }
@@ -501,7 +521,8 @@ struct FITFileDecoder {
                     print("  Sensor: \(mesg.getSensor())")
                 }
                 if mesg.isStartPressureValid() {
-                    print("  Start Pressure: \(String(format: "%.1f", mesg.getStartPressure())) bar")
+                    print(
+                        "  Start Pressure: \(String(format: "%.1f", mesg.getStartPressure())) bar")
                 }
                 if mesg.isEndPressureValid() {
                     print("  End Pressure: \(String(format: "%.1f", mesg.getEndPressure())) bar")
@@ -612,7 +633,9 @@ struct FITFileDecoder {
             let getterName = "get\(fieldName)"
             let getterSelector = NSSelectorFromString(getterName)
 
-            guard let valueStr = getValueString(fitMessage, selector: getterSelector) else { continue }
+            guard let valueStr = getValueString(fitMessage, selector: getterSelector) else {
+                continue
+            }
             fields.append((fieldName, valueStr))
         }
 
