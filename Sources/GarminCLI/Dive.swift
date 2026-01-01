@@ -72,12 +72,17 @@ struct DiveLogFetcher {
     /// - Parameters:
     ///   - start: Starting index for pagination (default: 0)
     ///   - limit: Maximum number of activities to fetch (default: 20)
+    ///   - outputPath: Optional file path to save the raw JSON response
     /// - Returns: Array of dive activities
-    func fetchDiveLogs(start: Int = 0, limit: Int = 20) async throws -> [DiveActivity] {
+    func fetchDiveLogs(start: Int = 0, limit: Int = 20, outputPath: String? = nil) async throws -> [DiveActivity] {
         // Use GarthClient connectAPI convenience method
         let path =
             "/activitylist-service/activities/search/activities?activityType=diving&start=\(start)&limit=\(limit)"
         let data = try await client.connectAPI(path)
+
+        if let outputPath = outputPath {
+            try data.write(to: URL(fileURLWithPath: outputPath))
+        }
 
         // // Print raw JSON for debugging
         // if let jsonString = String(data: data, encoding: .utf8) {

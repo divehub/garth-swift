@@ -2,30 +2,58 @@ import Foundation
 import Garth
 
 struct GarminCLI {
+    struct CLIOptions {
+        var useFileStore = false
+        var fileStorePath: String?
+        var endpointURL: URL?
+    }
+
+    struct EndpointConfiguration {
+        let domain: String
+        let ssoBaseURL: URL?
+        let connectAPIBaseURL: URL?
+        let oauthConsumerURL: URL?
+    }
+
+    struct CLIContext {
+        let credentialStore: CredentialStore
+        let tokenStorage: TokenStorage
+        let useFileStore: Bool
+        let endpoint: EndpointConfiguration
+    }
+
+    struct ParsedArguments {
+        let command: String
+        let commandArgs: [String]
+        let options: CLIOptions
+    }
+
     static func main() async {
-        let args = CommandLine.arguments.dropFirst()
-        let command = args.first ?? "help"
+        let args = Array(CommandLine.arguments.dropFirst())
+        let parsed = parseArguments(args)
+        let context = buildContext(options: parsed.options)
+        let command = parsed.command
 
         do {
             switch command {
             case "login":
-                try await loginCommand()
+                try await loginCommand(context: context)
             case "profile":
-                try await profileCommand()
+                try await profileCommand(args: parsed.commandArgs, context: context)
             case "logout":
-                try await logoutCommand()
+                try await logoutCommand(context: context)
             case "refresh":
-                try await refreshCommand()
+                try await refreshCommand(context: context)
             case "status":
-                try await statusCommand()
+                try await statusCommand(context: context)
             case "list-dives":
-                try await listDivesCommand()
+                try await listDivesCommand(args: parsed.commandArgs, context: context)
             case "list-devices":
-                try await listDevicesCommand()
+                try await listDevicesCommand(context: context)
             case "get-activity":
-                try await getActivityCommand(args: Array(args.dropFirst()))
+                try await getActivityCommand(args: parsed.commandArgs, context: context)
             case "decode-fit":
-                try decodeFitCommand(args: Array(args.dropFirst()))
+                try decodeFitCommand(args: parsed.commandArgs)
             case "help", "--help", "-h":
                 printHelp()
             default:
@@ -40,11 +68,12 @@ struct GarminCLI {
 
     // MARK: - Commands
 
-    static func loginCommand() async throws {
-        let credentialManager = CredentialManager()
+    static func loginCommand(context: CLIContext) async throws {
+        let credentialStore = context.credentialStore
+        let endpoint = context.endpoint
 
         // Check if already logged in
-        let tokenManager = TokenManager()
+        let tokenManager = TokenManager(storage: context.tokenStorage)
         if try await tokenManager.hasTokens() {
             print("Already logged in. Use 'logout' first to login with different credentials.")
             print("Or use 'profile' to verify your login.")
@@ -59,7 +88,7 @@ struct GarminCLI {
         let password: String
 
         // Check for saved credentials
-        if let saved = try? credentialManager.getCredentials() {
+        if let saved = try? credentialStore.getCredentials() {
             print("Found saved credentials for: \(saved.email)")
             print("Use saved credentials? (Y/n): ", terminator: "")
             let response = readLine()?.lowercased() ?? "y"
@@ -76,7 +105,13 @@ struct GarminCLI {
         print("\nLogging in...")
 
         // Perform SSO login
-        let ssoClient = SSOClient()
+        let ssoClient = SSOClient(
+            domain: endpoint.domain,
+            session: .shared,
+            ssoBaseURL: endpoint.ssoBaseURL,
+            connectAPIBaseURL: endpoint.connectAPIBaseURL,
+            oauthConsumerURL: endpoint.oauthConsumerURL
+        )
         let (oauth1, oauth2) = try await ssoClient.login(
             email: email,
             password: password,
@@ -94,14 +129,15 @@ struct GarminCLI {
         try await tokenManager.saveTokens(oauth1Token: oauth1, oauth2Token: oauth2)
 
         // Save credentials
-        try credentialManager.saveCredentials(email: email, password: password)
+        try credentialStore.saveCredentials(email: email, password: password)
 
         print("Login successful!")
-        print("Tokens saved to Keychain.")
+        let storeLabel = context.useFileStore ? "local file store" : "Keychain"
+        print("Tokens saved to \(storeLabel).")
     }
 
-    static func refreshCommand() async throws {
-        let tokenManager = TokenManager()
+    static func refreshCommand(context: CLIContext) async throws {
+        let tokenManager = TokenManager(storage: context.tokenStorage)
         
         guard try await tokenManager.hasTokens() else {
             print("Not logged in. Please run 'login' first.")
@@ -109,12 +145,16 @@ struct GarminCLI {
         }
 
         // Fetch consumer credentials
-        let consumer = try await fetchOAuthConsumer()
+        let consumer = try await fetchOAuthConsumer(
+            oauthConsumerURL: context.endpoint.oauthConsumerURL
+        )
 
         // Create client with token exchanger
         let exchanger = OAuthTokenExchanger(
+            domain: context.endpoint.domain,
             consumerKey: consumer.key,
-            consumerSecret: consumer.secret
+            consumerSecret: consumer.secret,
+            connectAPIBaseURL: context.endpoint.connectAPIBaseURL
         )
         await tokenManager.setTokenExchanger(exchanger)
 
@@ -126,33 +166,31 @@ struct GarminCLI {
         print("Expires At: \(Date(timeIntervalSince1970: newToken.expiresAt))")
     }
 
-    static func profileCommand() async throws {
-        let client = try await createGarthClient()
+    static func profileCommand(args: [String], context: CLIContext) async throws {
+        let outputPath = parseOutOption(args: args, usage: "Usage: GarminCLI profile [--out <path>]")
+        let client = try await createGarthClient(
+            tokenStorage: context.tokenStorage,
+            endpoint: context.endpoint
+        )
 
         // Get profile
         print("Fetching user profile...")
 
-        let oauth2 = try await client.tokenManager.getValidOAuth2Token()
-
-        // Make profile request
-        let url = URL(string: "https://connectapi.garmin.com/userprofile-service/socialProfile")!
-        var request = URLRequest(url: url)
-        request.setValue(oauth2.authorizationHeader, forHTTPHeaderField: "Authorization")
-        request.setValue("GCM-iOS-5.7.2.1", forHTTPHeaderField: "User-Agent")
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw GarthError.invalidResponse
-        }
-
-        if httpResponse.statusCode == 401 {
+        let data: Data
+        do {
+            (data, _) = try await client.request(
+                method: "GET",
+                subdomain: "connectapi",
+                path: "/userprofile-service/socialProfile"
+            )
+        } catch let GarthError.httpError(statusCode, _) where statusCode == 401 {
             print("Session expired. Please run 'login' again.")
             return
         }
 
-        guard (200...299).contains(httpResponse.statusCode) else {
-            throw GarthError.httpError(statusCode: httpResponse.statusCode, message: String(data: data, encoding: .utf8))
+        if let outputPath = outputPath {
+            try data.write(to: URL(fileURLWithPath: outputPath))
+            print("Saved raw response to \(outputPath)")
         }
 
         // Parse and display profile
@@ -180,19 +218,20 @@ struct GarminCLI {
         }
     }
 
-    static func logoutCommand() async throws {
-        let tokenManager = TokenManager()
-        let credentialManager = CredentialManager()
+    static func logoutCommand(context: CLIContext) async throws {
+        let tokenManager = TokenManager(storage: context.tokenStorage)
+        let credentialStore = context.credentialStore
 
         try await tokenManager.clearTokens()
-        try? credentialManager.deleteCredentials()
+        try? credentialStore.deleteCredentials()
 
         print("Logged out successfully.")
-        print("Tokens and credentials cleared from Keychain.")
+        let storeLabel = context.useFileStore ? "local file store" : "Keychain"
+        print("Tokens and credentials cleared from \(storeLabel).")
     }
 
-    static func statusCommand() async throws {
-        let tokenManager = TokenManager()
+    static func statusCommand(context: CLIContext) async throws {
+        let tokenManager = TokenManager(storage: context.tokenStorage)
 
         let status = try await tokenManager.getTokenStatus()
 
@@ -225,8 +264,12 @@ struct GarminCLI {
         }
     }
 
-    static func listDivesCommand() async throws {
-        let client = try await createGarthClient()
+    static func listDivesCommand(args: [String], context: CLIContext) async throws {
+        let outputPath = parseOutOption(args: args, usage: "Usage: GarminCLI list-dives [--out <path>]")
+        let client = try await createGarthClient(
+            tokenStorage: context.tokenStorage,
+            endpoint: context.endpoint
+        )
 
         // Fetch dive logs and total count
         print("Fetching dive logs...")
@@ -234,16 +277,22 @@ struct GarminCLI {
 
         // Fetch total count and activities in parallel
         async let totalCount = diveFetcher.fetchTotalDiveCount()
-        async let dives = diveFetcher.fetchDiveLogs(start: 0, limit: 20)
+        async let dives = diveFetcher.fetchDiveLogs(start: 0, limit: 20, outputPath: outputPath)
 
         let (total, activities) = try await (totalCount, dives)
 
         // Display results
+        if let outputPath = outputPath {
+            print("Saved raw response to \(outputPath)")
+        }
         diveFetcher.printDiveLogs(activities, totalCount: total)
     }
 
-    static func listDevicesCommand() async throws {
-        let client = try await createGarthClient()
+    static func listDevicesCommand(context: CLIContext) async throws {
+        let client = try await createGarthClient(
+            tokenStorage: context.tokenStorage,
+            endpoint: context.endpoint
+        )
 
         print("Fetching registered devices...")
         let deviceFetcher = DeviceListFetcher(client: client)
@@ -251,14 +300,17 @@ struct GarminCLI {
         deviceFetcher.printDevices(devices)
     }
 
-    static func getActivityCommand(args: [String]) async throws {
+    static func getActivityCommand(args: [String], context: CLIContext) async throws {
         guard let activityId = args.first else {
             print("Error: Activity ID is required")
             print("Usage: GarminCLI get-activity <activityId>")
             exit(1)
         }
 
-        let client = try await createGarthClient()
+        let client = try await createGarthClient(
+            tokenStorage: context.tokenStorage,
+            endpoint: context.endpoint
+        )
 
         // Download activity
         print("Downloading activity \(activityId)...")
@@ -293,6 +345,223 @@ struct GarminCLI {
 
     // MARK: - Helpers
 
+    static func parseArguments(_ args: [String]) -> ParsedArguments {
+        var options = CLIOptions()
+        var remainingArgs: [String] = []
+        var index = 0
+
+        while index < args.count {
+            let arg = args[index]
+
+            if arg == "--file-store" {
+                options.useFileStore = true
+                index += 1
+                continue
+            }
+
+            if arg == "--endpoint" {
+                guard index + 1 < args.count else {
+                    print("Error: --endpoint requires a base URL")
+                    printHelp()
+                    exit(1)
+                }
+                options.endpointURL = parseEndpointURL(args[index + 1], flag: "--endpoint")
+                index += 2
+                continue
+            }
+
+            if arg == "--file-store-path" {
+                guard index + 1 < args.count else {
+                    print("Error: --file-store-path requires a directory path")
+                    printHelp()
+                    exit(1)
+                }
+                options.useFileStore = true
+                options.fileStorePath = args[index + 1]
+                index += 2
+                continue
+            }
+
+            if arg.hasPrefix("--file-store=") {
+                let value = String(arg.dropFirst("--file-store=".count))
+                guard !value.isEmpty else {
+                    print("Error: --file-store requires a directory path")
+                    printHelp()
+                    exit(1)
+                }
+                options.useFileStore = true
+                options.fileStorePath = value
+                index += 1
+                continue
+            }
+
+            if arg.hasPrefix("--endpoint=") {
+                let value = String(arg.dropFirst("--endpoint=".count))
+                guard !value.isEmpty else {
+                    print("Error: --endpoint requires a base URL")
+                    printHelp()
+                    exit(1)
+                }
+                options.endpointURL = parseEndpointURL(value, flag: "--endpoint")
+                index += 1
+                continue
+            }
+
+            if arg.hasPrefix("--file-store-path=") {
+                let value = String(arg.dropFirst("--file-store-path=".count))
+                guard !value.isEmpty else {
+                    print("Error: --file-store-path requires a directory path")
+                    printHelp()
+                    exit(1)
+                }
+                options.useFileStore = true
+                options.fileStorePath = value
+                index += 1
+                continue
+            }
+
+            remainingArgs.append(arg)
+            index += 1
+        }
+
+        let command = remainingArgs.first ?? "help"
+        let commandArgs = Array(remainingArgs.dropFirst())
+        return ParsedArguments(command: command, commandArgs: commandArgs, options: options)
+    }
+
+    static func buildContext(options: CLIOptions) -> CLIContext {
+        let endpoint = resolveEndpointConfiguration(endpointURL: options.endpointURL)
+
+        if options.useFileStore {
+            let location = FileStoreLocation(path: options.fileStorePath)
+            return CLIContext(
+                credentialStore: FileCredentialStore(location: location),
+                tokenStorage: FileTokenStorage(location: location),
+                useFileStore: true,
+                endpoint: endpoint
+            )
+        }
+
+        return CLIContext(
+            credentialStore: KeychainCredentialStore(),
+            tokenStorage: KeychainManager.shared,
+            useFileStore: false,
+            endpoint: endpoint
+        )
+    }
+
+    static func parseEndpointURL(_ value: String, flag: String) -> URL {
+        guard let url = URL(string: value),
+              let scheme = url.scheme,
+              (scheme == "http" || scheme == "https"),
+              url.host != nil else {
+            print("Error: \(flag) requires a valid http(s) URL")
+            printHelp()
+            exit(1)
+        }
+
+        return url
+    }
+
+    static func resolveEndpointConfiguration(endpointURL: URL?) -> EndpointConfiguration {
+        let defaultDomain = "garmin.com"
+        guard let endpointURL = endpointURL else {
+            return EndpointConfiguration(
+                domain: defaultDomain,
+                ssoBaseURL: nil,
+                connectAPIBaseURL: nil,
+                oauthConsumerURL: nil
+            )
+        }
+
+        let scheme = endpointURL.scheme ?? "https"
+        let host = endpointURL.host ?? defaultDomain
+        let domain = extractDomain(from: host)
+
+        if domain == "garmin.com" || domain == "garmin.cn" {
+            let ssoBaseURL = URL(string: "\(scheme)://sso.\(domain)")!
+            let connectAPIBaseURL = URL(string: "\(scheme)://connectapi.\(domain)")!
+            return EndpointConfiguration(
+                domain: domain,
+                ssoBaseURL: ssoBaseURL,
+                connectAPIBaseURL: connectAPIBaseURL,
+                oauthConsumerURL: nil
+            )
+        }
+
+        return EndpointConfiguration(
+            domain: host,
+            ssoBaseURL: endpointURL,
+            connectAPIBaseURL: endpointURL,
+            oauthConsumerURL: endpointURL.appendingPathComponent("oauth_consumer.json")
+        )
+    }
+
+    static func extractDomain(from host: String) -> String {
+        if host.hasPrefix("sso.") {
+            return String(host.dropFirst("sso.".count))
+        }
+        if host.hasPrefix("connectapi.") {
+            return String(host.dropFirst("connectapi.".count))
+        }
+        return host
+    }
+
+    static func parseOutOption(args: [String], usage: String) -> String? {
+        var outputPath: String?
+        var index = 0
+
+        while index < args.count {
+            let arg = args[index]
+            if arg == "--out" {
+                guard index + 1 < args.count else {
+                    print("Error: --out requires a file path")
+                    print(usage)
+                    exit(1)
+                }
+                outputPath = args[index + 1]
+                index += 2
+                continue
+            }
+
+            if arg.hasPrefix("--out=") {
+                let value = String(arg.dropFirst("--out=".count))
+                guard !value.isEmpty else {
+                    print("Error: --out requires a file path")
+                    print(usage)
+                    exit(1)
+                }
+                outputPath = value
+                index += 1
+                continue
+            }
+
+            if arg == "--help" || arg == "-h" {
+                print(usage)
+                exit(0)
+            }
+
+            print("Error: Unknown argument '\(arg)'")
+            print(usage)
+            exit(1)
+        }
+
+        if let outputPath = outputPath {
+            return resolveOutputPath(outputPath)
+        }
+
+        return nil
+    }
+
+    static func resolveOutputPath(_ path: String) -> String {
+        let expandedPath = (path as NSString).expandingTildeInPath
+        if expandedPath.hasPrefix("/") {
+            return expandedPath
+        }
+
+        return FileManager.default.currentDirectoryPath + "/" + expandedPath
+    }
+
     static func promptCredentials() -> (email: String, password: String) {
         print("Email: ", terminator: "")
         let email = readLine() ?? ""
@@ -308,12 +577,17 @@ struct GarminCLI {
         print("""
         GarminCLI - Garmin Connect Authentication Tool
 
-        Usage: GarminCLI <command>
+        Usage: GarminCLI [options] <command>
+
+        Options:
+            --file-store          Use local file-based credential and token storage (default: ~/.garmincli)
+            --file-store-path <path>  Override file store directory (implies --file-store)
+            --endpoint <url>      Use a mock base URL or Garmin domain (http(s)://host[:port])
 
         Commands:
             login           Login to Garmin Connect with username/password
-            profile         Fetch and display user profile
-            list-dives      Fetch and display dive logs
+            profile         Fetch and display user profile (use --out <path> to save JSON)
+            list-dives      Fetch and display dive logs (use --out <path> to save JSON)
             list-devices    List registered devices
             get-activity    Download activity FIT file by ID
             decode-fit      Decode and display FIT file data
@@ -324,8 +598,13 @@ struct GarminCLI {
 
         Examples:
             GarminCLI login
+            GarminCLI --file-store login
+            GarminCLI --endpoint http://localhost:8080 login
+            GarminCLI --endpoint https://garmin.cn login
             GarminCLI profile
+            GarminCLI profile --out profile.json
             GarminCLI list-dives
+            GarminCLI list-dives --out dives.json
             GarminCLI list-devices
             GarminCLI get-activity 12345678901
             GarminCLI decode-fit 12345678901.fit
@@ -333,8 +612,8 @@ struct GarminCLI {
         """)
     }
 
-    static func fetchOAuthConsumer() async throws -> (key: String, secret: String) {
-        let url = URL(string: "https://thegarth.s3.amazonaws.com/oauth_consumer.json")!
+    static func fetchOAuthConsumer(oauthConsumerURL: URL? = nil) async throws -> (key: String, secret: String) {
+        let url = oauthConsumerURL ?? URL(string: "https://thegarth.s3.amazonaws.com/oauth_consumer.json")!
         let (data, _) = try await URLSession.shared.data(from: url)
 
         struct Consumer: Decodable {
@@ -346,8 +625,8 @@ struct GarminCLI {
         return (consumer.consumer_key, consumer.consumer_secret)
     }
 
-    static func createGarthClient() async throws -> GarthClient {
-        let tokenManager = TokenManager()
+    static func createGarthClient(tokenStorage: TokenStorage, endpoint: EndpointConfiguration) async throws -> GarthClient {
+        let tokenManager = TokenManager(storage: tokenStorage)
 
         guard try await tokenManager.hasTokens() else {
             print("Not logged in. Please run 'login' first.")
@@ -355,89 +634,25 @@ struct GarminCLI {
         }
 
         // Fetch consumer credentials
-        let consumer = try await fetchOAuthConsumer()
+        let consumer = try await fetchOAuthConsumer(
+            oauthConsumerURL: endpoint.oauthConsumerURL
+        )
 
         // Create client with token exchanger
         let exchanger = OAuthTokenExchanger(
+            domain: endpoint.domain,
             consumerKey: consumer.key,
-            consumerSecret: consumer.secret
+            consumerSecret: consumer.secret,
+            connectAPIBaseURL: endpoint.connectAPIBaseURL
         )
         await tokenManager.setTokenExchanger(exchanger)
 
-        return GarthClient(tokenManager: tokenManager)
+        return GarthClient(
+            domain: endpoint.domain,
+            tokenManager: tokenManager,
+            connectAPIBaseURL: endpoint.connectAPIBaseURL
+        )
     }
 }
-
-// MARK: - Credential Manager
-
-/// Manages username/password storage in Keychain
-struct CredentialManager {
-    private let service = "com.garth.credentials"
-
-    struct Credentials {
-        let email: String
-        let password: String
-    }
-
-    func saveCredentials(email: String, password: String) throws {
-        let data = "\(email):\(password)".data(using: .utf8)!
-
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: "garmin_credentials",
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
-        ]
-
-        // Delete existing
-        SecItemDelete(query as CFDictionary)
-
-        // Add new
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw GarthError.tokenExchangeFailed("Failed to save credentials: \(status)")
-        }
-    }
-
-    func getCredentials() throws -> Credentials? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: "garmin_credentials",
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-
-        if status == errSecItemNotFound {
-            return nil
-        }
-
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              let string = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-
-        let parts = string.split(separator: ":", maxSplits: 1)
-        guard parts.count == 2 else { return nil }
-
-        return Credentials(email: String(parts[0]), password: String(parts[1]))
-    }
-
-    func deleteCredentials() throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: "garmin_credentials"
-        ]
-
-        SecItemDelete(query as CFDictionary)
-    }
-}
-
 // Entry point
 await GarminCLI.main()

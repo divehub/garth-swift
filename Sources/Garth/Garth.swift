@@ -6,6 +6,9 @@ public actor GarthClient {
     /// The Garmin domain (e.g., "garmin.com" or "garmin.cn")
     public let domain: String
 
+    /// Optional base URL override for Connect API requests.
+    public let connectAPIBaseURL: URL?
+
     /// Token manager for handling OAuth token lifecycle
     public let tokenManager: TokenManager
 
@@ -30,16 +33,19 @@ public actor GarthClient {
         keychainManager: KeychainManager = .shared,
         session: URLSession = .shared,
         consumerKey: String,
-        consumerSecret: String
+        consumerSecret: String,
+        connectAPIBaseURL: URL? = nil
     ) {
         self.domain = domain
         self.session = session
+        self.connectAPIBaseURL = connectAPIBaseURL
 
         let tokenExchanger = OAuthTokenExchanger(
             domain: domain,
             consumerKey: consumerKey,
             consumerSecret: consumerSecret,
-            session: session
+            session: session,
+            connectAPIBaseURL: connectAPIBaseURL
         )
 
         self.tokenManager = TokenManager(
@@ -56,11 +62,13 @@ public actor GarthClient {
     public init(
         domain: String = "garmin.com",
         tokenManager: TokenManager,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        connectAPIBaseURL: URL? = nil
     ) {
         self.domain = domain
         self.tokenManager = tokenManager
         self.session = session
+        self.connectAPIBaseURL = connectAPIBaseURL
     }
 
     // MARK: - Authentication Status
@@ -115,9 +123,15 @@ public actor GarthClient {
         // Get a valid OAuth2 token (auto-refreshes if needed)
         let oauth2Token = try await tokenManager.getValidOAuth2Token()
 
-        let urlString = "https://\(subdomain).\(domain)\(path)"
-        guard let url = URL(string: urlString) else {
-            throw GarthError.tokenExchangeFailed("Invalid URL: \(urlString)")
+        let url: URL
+        if subdomain == "connectapi", let baseURL = connectAPIBaseURL {
+            url = try resolveConnectAPIURL(baseURL: baseURL, path: path)
+        } else {
+            let urlString = "https://\(subdomain).\(domain)\(path)"
+            guard let resolvedURL = URL(string: urlString) else {
+                throw GarthError.tokenExchangeFailed("Invalid URL: \(urlString)")
+            }
+            url = resolvedURL
         }
 
         var request = URLRequest(url: url)
@@ -183,6 +197,37 @@ public actor GarthClient {
     public func deleteConnectAPI(_ path: String) async throws -> Data {
         let (data, _) = try await request(method: "DELETE", subdomain: "connectapi", path: path)
         return data
+    }
+
+    private func resolveConnectAPIURL(baseURL: URL, path: String) throws -> URL {
+        let relativePath = path.hasPrefix("/") ? String(path.dropFirst()) : path
+        let normalizedBaseURL = normalizedBaseURL(baseURL)
+
+        guard let relativeComponents = URLComponents(string: relativePath),
+              let relativeURL = URL(string: relativeComponents.path, relativeTo: normalizedBaseURL),
+              var components = URLComponents(url: relativeURL, resolvingAgainstBaseURL: true) else {
+            throw GarthError.tokenExchangeFailed("Invalid URL: \(baseURL.absoluteString)\(path)")
+        }
+
+        components.queryItems = relativeComponents.queryItems
+
+        guard let url = components.url else {
+            throw GarthError.tokenExchangeFailed("Invalid URL: \(baseURL.absoluteString)\(path)")
+        }
+
+        return url
+    }
+
+    private func normalizedBaseURL(_ baseURL: URL) -> URL {
+        guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
+            return baseURL
+        }
+
+        if !components.path.hasSuffix("/") {
+            components.path += "/"
+        }
+
+        return components.url ?? baseURL
     }
 }
 

@@ -7,6 +7,15 @@ public struct SSOClient: Sendable {
     /// The Garmin domain (e.g., "garmin.com" or "garmin.cn")
     public let domain: String
 
+    /// Optional base URL override for SSO requests.
+    public let ssoBaseURL: URL?
+
+    /// Optional base URL override for Connect API requests.
+    public let connectAPIBaseURL: URL?
+
+    /// Optional base URL override for OAuth consumer credentials.
+    public let oauthConsumerURL: URL?
+
     /// URLSession for network requests
     private let session: URLSession
 
@@ -21,9 +30,18 @@ public struct SSOClient: Sendable {
     private static let titlePattern = try! NSRegularExpression(pattern: #"<title>(.+?)</title>"#)
     private static let ticketPattern = try! NSRegularExpression(pattern: #"embed\?ticket=([^"]+)""#)
 
-    public init(domain: String = "garmin.com", session: URLSession = .shared) {
+    public init(
+        domain: String = "garmin.com",
+        session: URLSession = .shared,
+        ssoBaseURL: URL? = nil,
+        connectAPIBaseURL: URL? = nil,
+        oauthConsumerURL: URL? = nil
+    ) {
         self.domain = domain
         self.session = session
+        self.ssoBaseURL = ssoBaseURL
+        self.connectAPIBaseURL = connectAPIBaseURL
+        self.oauthConsumerURL = oauthConsumerURL
     }
 
     /// Performs full SSO login flow with username and password.
@@ -38,8 +56,9 @@ public struct SSOClient: Sendable {
         mfaHandler: (() async throws -> String)? = nil
     ) async throws -> (OAuth1Token, OAuth2Token) {
         // Build URLs
-        let ssoBase = "https://sso.\(domain)/sso"
-        let ssoEmbed = "\(ssoBase)/embed"
+        let baseSSOURL = resolvedSSOBaseURL()
+        let ssoBase = baseSSOURL.appendingPathComponent("sso").absoluteString
+        let ssoEmbed = baseSSOURL.appendingPathComponent("sso/embed").absoluteString
 
         let embedParams: [String: String] = [
             "id": "gauth-widget",
@@ -63,7 +82,8 @@ public struct SSOClient: Sendable {
         let csrfToken = try extractCSRF(from: signinHTML)
         
         // Get the actual URL we landed on (redirects resolved) to use as Referer
-        let refererURL = signinResponse?.url?.absoluteString ?? "https://sso.\(domain)/sso/signin"
+        let refererURL = signinResponse?.url?.absoluteString
+            ?? baseSSOURL.appendingPathComponent("sso/signin").absoluteString
 
         // Step 3: Submit credentials
         let (loginResponseString, _) = try await post(
@@ -128,7 +148,8 @@ public struct SSOClient: Sendable {
             domain: domain,
             consumerKey: consumer.key,
             consumerSecret: consumer.secret,
-            session: session
+            session: session,
+            connectAPIBaseURL: connectAPIBaseURL
         )
         let oauth2 = try await exchanger.exchange(oauth1Token: oauth1)
 
@@ -137,9 +158,7 @@ public struct SSOClient: Sendable {
 
     /// Fetches OAuth consumer credentials from S3.
     private func fetchOAuthConsumer() async throws -> OAuthConsumer {
-        guard let url = URL(string: Self.oauthConsumerURL) else {
-            throw GarthError.tokenExchangeFailed("Invalid OAuth consumer URL")
-        }
+        let url = try resolvedOAuthConsumerURL()
 
         let (data, _) = try await session.data(from: url)
 
@@ -154,8 +173,10 @@ public struct SSOClient: Sendable {
 
     /// Gets OAuth1 token using the SSO ticket.
     private func getOAuth1Token(ticket: String, consumer: OAuthConsumer) async throws -> OAuth1Token {
-        let loginURL = "https://sso.\(domain)/sso/embed"
-        let baseURL = "https://connectapi.\(domain)/oauth-service/oauth/preauthorized"
+        let baseSSOURL = resolvedSSOBaseURL()
+        let baseConnectURL = resolvedConnectAPIBaseURL()
+        let loginURL = baseSSOURL.appendingPathComponent("sso/embed").absoluteString
+        let baseURL = baseConnectURL.appendingPathComponent("oauth-service/oauth/preauthorized").absoluteString
         let urlString = "\(baseURL)?ticket=\(ticket)&login-url=\(loginURL.urlQueryEncoded)&accepts-mfa-tokens=true"
 
         guard let url = URL(string: urlString) else {
@@ -207,12 +228,7 @@ public struct SSOClient: Sendable {
     // MARK: - HTTP Helpers
 
     private func get(path: String, params: [String: String]) async throws -> (String, HTTPURLResponse?) {
-        var components = URLComponents(string: "https://sso.\(domain)\(path)")!
-        components.queryItems = params.map { URLQueryItem(name: $0.key, value: $0.value) }
-
-        guard let url = components.url else {
-            throw GarthError.tokenExchangeFailed("Invalid URL")
-        }
+        let url = try buildURL(baseURL: resolvedSSOBaseURL(), path: path, params: params)
 
         var request = URLRequest(url: url)
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
@@ -228,12 +244,7 @@ public struct SSOClient: Sendable {
         headers: [String: String] = [:],
         formData: [String: String]
     ) async throws -> (String, HTTPURLResponse?) {
-        var components = URLComponents(string: "https://sso.\(domain)\(path)")!
-        components.queryItems = params.map { URLQueryItem(name: $0.key, value: $0.value) }
-
-        guard let url = components.url else {
-            throw GarthError.tokenExchangeFailed("Invalid URL")
-        }
+        let url = try buildURL(baseURL: resolvedSSOBaseURL(), path: path, params: params)
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -250,6 +261,56 @@ public struct SSOClient: Sendable {
         let (data, response) = try await session.data(for: request)
         let html = String(data: data, encoding: .utf8) ?? ""
         return (html, response as? HTTPURLResponse)
+    }
+
+    private func buildURL(baseURL: URL, path: String, params: [String: String]) throws -> URL {
+        let relativePath = path.hasPrefix("/") ? String(path.dropFirst()) : path
+        let normalizedBaseURL = normalizedBaseURL(baseURL)
+
+        guard let relativeURL = URL(string: relativePath, relativeTo: normalizedBaseURL),
+              var components = URLComponents(url: relativeURL, resolvingAgainstBaseURL: true) else {
+            throw GarthError.tokenExchangeFailed("Invalid URL")
+        }
+
+        components.queryItems = params.map { URLQueryItem(name: $0.key, value: $0.value) }
+
+        guard let url = components.url else {
+            throw GarthError.tokenExchangeFailed("Invalid URL")
+        }
+
+        return url
+    }
+
+    private func normalizedBaseURL(_ baseURL: URL) -> URL {
+        guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
+            return baseURL
+        }
+
+        if !components.path.hasSuffix("/") {
+            components.path += "/"
+        }
+
+        return components.url ?? baseURL
+    }
+
+    private func resolvedSSOBaseURL() -> URL {
+        ssoBaseURL ?? URL(string: "https://sso.\(domain)")!
+    }
+
+    private func resolvedConnectAPIBaseURL() -> URL {
+        connectAPIBaseURL ?? URL(string: "https://connectapi.\(domain)")!
+    }
+
+    private func resolvedOAuthConsumerURL() throws -> URL {
+        if let overrideURL = oauthConsumerURL {
+            return overrideURL
+        }
+
+        guard let url = URL(string: Self.oauthConsumerURL) else {
+            throw GarthError.tokenExchangeFailed("Invalid OAuth consumer URL")
+        }
+
+        return url
     }
 
     // MARK: - Parsing Helpers

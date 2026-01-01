@@ -8,6 +8,9 @@ public struct OAuthTokenExchanger: TokenExchanger, Sendable {
     /// The base domain for API requests (e.g., "garmin.com")
     public let domain: String
 
+    /// Optional base URL override for the Connect API.
+    public let connectAPIBaseURL: URL?
+
     /// URLSession for network requests
     private let session: URLSession
 
@@ -30,12 +33,14 @@ public struct OAuthTokenExchanger: TokenExchanger, Sendable {
         domain: String = "garmin.com",
         consumerKey: String,
         consumerSecret: String,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        connectAPIBaseURL: URL? = nil
     ) {
         self.domain = domain
         self.consumerKey = consumerKey
         self.consumerSecret = consumerSecret
         self.session = session
+        self.connectAPIBaseURL = connectAPIBaseURL
     }
 
     /// Exchanges an OAuth1 token for a new OAuth2 token.
@@ -43,11 +48,18 @@ public struct OAuthTokenExchanger: TokenExchanger, Sendable {
     /// - Returns: A new OAuth2 token.
     /// - Throws: `GarthError` if the exchange fails.
     public func exchange(oauth1Token: OAuth1Token) async throws -> OAuth2Token {
-        let domain = oauth1Token.domain ?? self.domain
-        let urlString = "https://connectapi.\(domain)/oauth-service/oauth/exchange/user/2.0"
+        let url: URL
+        if let baseURL = connectAPIBaseURL,
+           let resolvedURL = resolvedConnectAPIURL(baseURL: baseURL, path: "/oauth-service/oauth/exchange/user/2.0") {
+            url = resolvedURL
+        } else {
+            let domain = oauth1Token.domain ?? self.domain
+            let urlString = "https://connectapi.\(domain)/oauth-service/oauth/exchange/user/2.0"
 
-        guard let url = URL(string: urlString) else {
-            throw GarthError.tokenExchangeFailed("Invalid URL")
+            guard let resolvedURL = URL(string: urlString) else {
+                throw GarthError.tokenExchangeFailed("Invalid URL")
+            }
+            url = resolvedURL
         }
 
         var request = URLRequest(url: url)
@@ -88,6 +100,24 @@ public struct OAuthTokenExchanger: TokenExchanger, Sendable {
         }
 
         return try parseOAuth2Response(data)
+    }
+
+    private func resolvedConnectAPIURL(baseURL: URL, path: String) -> URL? {
+        let relativePath = path.hasPrefix("/") ? String(path.dropFirst()) : path
+        let normalizedBaseURL = normalizedBaseURL(baseURL)
+        return URL(string: relativePath, relativeTo: normalizedBaseURL)?.absoluteURL
+    }
+
+    private func normalizedBaseURL(_ baseURL: URL) -> URL {
+        guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
+            return baseURL
+        }
+
+        if !components.path.hasSuffix("/") {
+            components.path += "/"
+        }
+
+        return components.url ?? baseURL
     }
 
     // MARK: - OAuth1 Signature
