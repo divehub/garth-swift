@@ -156,11 +156,16 @@ public struct SSOClient: Sendable {
         return (oauth1, oauth2)
     }
 
-    /// Fetches OAuth consumer credentials from S3.
+    /// Fetches OAuth consumer credentials from a remote or local URL.
     private func fetchOAuthConsumer() async throws -> OAuthConsumer {
         let url = try resolvedOAuthConsumerURL()
-
-        let (data, _) = try await session.data(from: url)
+        let data: Data
+        if url.isFileURL {
+            data = try Data(contentsOf: url)
+        } else {
+            let (remoteData, _) = try await session.data(from: url)
+            data = remoteData
+        }
 
         struct ConsumerResponse: Decodable {
             let consumer_key: String
