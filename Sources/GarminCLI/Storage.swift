@@ -14,7 +14,7 @@ protocol CredentialStore: Sendable {
 }
 
 struct KeychainCredentialStore: CredentialStore {
-    private let service = "com.garth.credentials"
+    private let service = "ai.divehub.garth.credentials"
     private let account = "garmin_credentials"
 
     func saveCredentials(email: String, password: String) throws {
@@ -25,7 +25,7 @@ struct KeychainCredentialStore: CredentialStore {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
         ]
 
         SecItemDelete(query as CFDictionary)
@@ -42,7 +42,7 @@ struct KeychainCredentialStore: CredentialStore {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
+            kSecMatchLimit as String: kSecMatchLimitOne,
         ]
 
         var result: AnyObject?
@@ -53,8 +53,9 @@ struct KeychainCredentialStore: CredentialStore {
         }
 
         guard status == errSecSuccess,
-              let data = result as? Data,
-              let string = String(data: data, encoding: .utf8) else {
+            let data = result as? Data,
+            let string = String(data: data, encoding: .utf8)
+        else {
             return nil
         }
 
@@ -68,7 +69,7 @@ struct KeychainCredentialStore: CredentialStore {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account
+            kSecAttrAccount as String: account,
         ]
 
         SecItemDelete(query as CFDictionary)
